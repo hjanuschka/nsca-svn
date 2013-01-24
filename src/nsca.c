@@ -1,11 +1,10 @@
 /*******************************************************************************
  *
  * NSCA.C - Nagios Service Check Acceptor
- * Copyright (c) 2009 Nagios Core Development Team and Community Contributors
- * Copyright (c) 2000-2009 Ethan Galstad (egalstad@nagios.org)
+ * Copyright (c) 2000-2008 Ethan Galstad (nagios@nagios.org)
  * License: GPL v2
  *
- * Last Modified: 01-27-2012
+ * Last Modified: 01-15-2008
  *
  * Command line: NSCA -c <config_file> [mode]
  *
@@ -21,6 +20,7 @@
 #include "../include/netutils.h"
 #include "../include/utils.h"
 #include "../include/nsca.h"
+#include "../include/bartlby.h"
 
 
 static int server_port=DEFAULT_SERVER_PORT;
@@ -32,6 +32,7 @@ static char config_file[MAX_INPUT_BUFFER]="nsca.cfg";
 static char alternate_dump_file[MAX_INPUT_BUFFER]="/dev/null";
 static char command_file[MAX_INPUT_BUFFER]="";
 static char password[MAX_INPUT_BUFFER]="";
+static char bartlby_shm_key[MAX_INPUT_BUFFER]="";
 
 static enum { OPTIONS_ERROR, SINGLE_PROCESS_DAEMON, MULTI_PROCESS_DAEMON, INETD } mode=SINGLE_PROCESS_DAEMON;
 static int debug=FALSE;
@@ -44,8 +45,6 @@ char    *nsca_user=NULL;
 char    *nsca_group=NULL;
 
 char    *nsca_chroot=NULL;
-char    *check_result_path=NULL;
-
 
 char    *pid_file=NULL;
 int     wrote_pid_file=FALSE;
@@ -58,7 +57,7 @@ int     sigrestart=FALSE;
 int     sigshutdown=FALSE;
 
 int	using_alternate_dump_file=FALSE;
-static FILE *command_file_fp=NULL;
+void *command_file_fp=NULL;
 
 struct handler_entry *rhand=NULL;
 struct handler_entry *whand=NULL;
@@ -92,10 +91,9 @@ int main(int argc, char **argv){
 		if(result!=OK)
 			printf("Incorrect command line arguments supplied\n");
                 printf("\n");
-                printf("NSCA - Nagios Service Check Acceptor\n");
-		printf("Copyright (c) 2009 Nagios Core Development Team and Community Contributors\n");
-                printf("Copyright (c) 2000-2009 Ethan Galstad\n");
-                printf("Version: %s\n",PROGRAM_VERSION);
+                printf("NSCA - Nagios Service Check Acceptor (patched for bartlby.org project)\n");
+								printf("NSCA: Copyright (c) 2000-2007 Ethan Galstad (www.nagios.org)\n");          
+								printf("Version: %s\n",PROGRAM_VERSION);
                 printf("Last Modified: %s\n",MODIFICATION_DATE);
                 printf("License: GPL v2\n");
                 printf("Encryption Routines: ");
@@ -244,9 +242,6 @@ int main(int argc, char **argv){
 
 				if(sigrestart==TRUE){
 
-					/* free memory */
-					free_memory();
-
 					/* re-read the config file */
 					result=read_config_file(config_file);	
 
@@ -281,9 +276,6 @@ int main(int argc, char **argv){
 /* cleanup */
 static void do_cleanup(void){
 
-	/* free memory */
-	free_memory();
-
         /* close the command file if its still open */
         if(command_file_fp!=NULL)
                 close_command_file();
@@ -298,31 +290,6 @@ static void do_cleanup(void){
 
 	return;
         }
-
-
-/* free some memory */
-static void free_memory(void){
-
-	if(nsca_user){
-		free(nsca_user);
-		nsca_user=NULL;
-		}
-	if(nsca_group){
-		free(nsca_group);
-		nsca_group=NULL;
-		}
-	if(nsca_chroot){
-		free(nsca_chroot);
-		nsca_chroot=NULL;
-		}
-	if(pid_file){
-		free(pid_file);
-		pid_file=NULL;
-		}
-
-	return;
-	}
-
 
 
 /* exit cleanly */
@@ -414,6 +381,14 @@ static int read_config_file(char *filename){
                         strncpy(password,varvalue,sizeof(password)-1);
                         password[sizeof(password)-1]='\0';
                         }
+    else if(strstr(input_buffer,"bartlby_shm_key")){
+                       if(strlen(varvalue)>sizeof(bartlby_shm_key)-1){
+                               syslog(LOG_ERR,"bartlby shm key is too long in config file '%s' - Line %d\n",filename,line);
+                               return ERROR;
+                               }
+                       strncpy(bartlby_shm_key,varvalue,sizeof(bartlby_shm_key)-1);
+                       password[sizeof(bartlby_shm_key)-1]='\0';
+                       }
 		else if(strstr(input_buffer,"decryption_method")){
 
                         decryption_method=atoi(varvalue);
@@ -467,27 +442,6 @@ static int read_config_file(char *filename){
                         else 
                                 aggregate_writes=FALSE;
                         }
-                    else if(strstr(input_buffer,"check_result_path")){
-                            if(strlen(varvalue)>MAX_INPUT_BUFFER-1){
-                                    syslog(LOG_ERR,"Check result path is too long in config file '%s' - Line %d\n",filename,line);
-                                    return ERROR;
-                                    }
-                            check_result_path=strdup(varvalue);
-                            
-                            int checkresult_test_fd=-1;
-                            char *checkresult_test=NULL;
-                            asprintf(&checkresult_test,"%s/nsca.test.%i",check_result_path,getpid());
-                            checkresult_test_fd=open(checkresult_test,O_WRONLY|O_CREAT);
-                            if (checkresult_test_fd>0){
-                                    unlink(checkresult_test);
-                                    }
-                            else {
-                                    printf("error!\n");
-                                    syslog(LOG_ERR,"check_result_path config variable found, but directory not writeable.\n");
-                                    return ERROR;
-                                    }
-                            }
-
 		else if(strstr(input_buffer,"append_to_file")){
                         if(atoi(varvalue)>0)
                                 append_to_file=TRUE;
@@ -526,6 +480,7 @@ static int read_config_file(char *filename){
 
 		else{
                         syslog(LOG_ERR,"Unknown option specified in config file '%s' - Line %d\n",filename,line);
+
                         return ERROR;
                         }
                 }
@@ -1081,8 +1036,6 @@ static void handle_connection_read(int sock, void *data){
         char host_name[MAX_HOSTNAME_LENGTH];
         char svc_description[MAX_DESCRIPTION_LENGTH];
         char plugin_output[MAX_PLUGINOUTPUT_LENGTH];
-        int packet_length=sizeof(receive_packet);
-        int plugin_length=MAX_PLUGINOUTPUT_LENGTH;
 
         CI=data;
 
@@ -1094,25 +1047,19 @@ static void handle_connection_read(int sock, void *data){
 
         /* recv() error or client disconnect */
         if(rc<=0){
-                if( OLD_PACKET_LENGTH == bytes_to_recv){
-                        packet_length=OLD_PACKET_LENGTH;
-                        plugin_length=OLD_PLUGINOUTPUT_LENGTH;
-                        }
-				else {
-                        if(debug==TRUE)
-                                syslog(LOG_ERR,"End of connection...");
-                        encrypt_cleanup(decryption_method, CI);
-                        close(sock);
-                        if(mode==SINGLE_PROCESS_DAEMON)
-                                return;
-                        else
-                                do_exit(STATE_OK);
-                        }
+                if(debug==TRUE)
+                        syslog(LOG_ERR,"End of connection...");
+                encrypt_cleanup(decryption_method, CI);
+                close(sock);
+                if(mode==SINGLE_PROCESS_DAEMON)
+                        return;
+                else
+                        do_exit(STATE_OK);
                 }
 
         /* we couldn't read the correct amount of data, so bail out */
-        if(bytes_to_recv!=packet_length){
-                syslog(LOG_ERR,"Data sent from client was too short (%d < %d), aborting...",bytes_to_recv,packet_length);
+        if(bytes_to_recv!=sizeof(receive_packet)){
+                syslog(LOG_ERR,"Data sent from client was too short (%d < %d), aborting...",bytes_to_recv,sizeof(receive_packet));
                 encrypt_cleanup(decryption_method, CI);
                 close(sock);
 		return;
@@ -1127,7 +1074,7 @@ static void handle_connection_read(int sock, void *data){
                 register_read_handler(sock, handle_connection_read, (void *)CI);
 
         /* decrypt the packet */
-        decrypt_buffer((char *)&receive_packet,packet_length,password,decryption_method,CI);
+        decrypt_buffer((char *)&receive_packet,sizeof(receive_packet),password,decryption_method,CI);
 
         /* make sure this is the right type of packet */
         if(ntohs(receive_packet.packet_version)!=NSCA_PACKET_VERSION_3){
@@ -1143,7 +1090,7 @@ static void handle_connection_read(int sock, void *data){
         /* check the crc 32 value */
         packet_crc32=ntohl(receive_packet.crc32_value);
         receive_packet.crc32_value=0L;
-        calculated_crc32=calculate_crc32((char *)&receive_packet,packet_length);
+        calculated_crc32=calculate_crc32((char *)&receive_packet,sizeof(receive_packet));
         if(packet_crc32!=calculated_crc32){
                 syslog(LOG_ERR,"Dropping packet with invalid CRC32 - possibly due to client using wrong password or crypto algorithm?");
                 /*return;*/
@@ -1154,36 +1101,47 @@ static void handle_connection_read(int sock, void *data){
                         do_exit(STATE_OK);
                  }
 
-        /* host name */
-        strncpy(host_name,receive_packet.host_name,sizeof(host_name)-1);
-        host_name[sizeof(host_name)-1]='\0';
-
-        packet_age=(unsigned long)(current_time-packet_time);
-        if(debug==TRUE)
-                  syslog(LOG_ERR,"Time difference in packet: %lu seconds for host %s", packet_age, host_name);
-        if((max_packet_age>0 && (packet_age>max_packet_age) && (packet_age>=0)) ||
-                ((max_packet_age>0) && (packet_age<(0-max_packet_age)) && (packet_age < 0))
-        ){
-                syslog(LOG_ERR,"Dropping packet with stale timestamp for %s - packet was %lu seconds old.",host_name,packet_age);
+        /* check the timestamp in the packet */
+        packet_time=(time_t)ntohl(receive_packet.timestamp);
+        time(&current_time);
+        if(packet_time>current_time){
+                syslog(LOG_ERR,"Dropping packet with future timestamp.");
+                /*return;*/
 		close(sock);
                 if(mode==SINGLE_PROCESS_DAEMON)
                         return;
                 else
                         do_exit(STATE_OK);
-        }
+                }
+	else{
+                packet_age=(unsigned long)(current_time-packet_time);
+                if(max_packet_age>0 && (packet_age>max_packet_age)){
+                        syslog(LOG_ERR,"Dropping packet with stale timestamp - packet was %lu seconds old.",packet_age);
+                        /*return;*/
+			close(sock);
+			if(mode==SINGLE_PROCESS_DAEMON)
+				return;
+			else
+				do_exit(STATE_OK);
+                        }
+                }
 
         /**** GET THE SERVICE CHECK INFORMATION ****/
 
         /* plugin return code */
         return_code=ntohs(receive_packet.return_code);
 
+        /* host name */
+        strncpy(host_name,receive_packet.host_name,sizeof(host_name)-1);
+        host_name[sizeof(host_name)-1]='\0';
+        
         /* service description */
         strncpy(svc_description,receive_packet.svc_description,sizeof(svc_description)-1);
         svc_description[sizeof(svc_description)-1]='\0';
         
         /* plugin output */
-        strncpy(plugin_output,receive_packet.plugin_output,plugin_length-1);
-        plugin_output[plugin_length-1]='\0';
+        strncpy(plugin_output,receive_packet.plugin_output,sizeof(plugin_output)-1);
+        plugin_output[sizeof(plugin_output)-1]='\0';
 
         /* log info to syslog facility */
         if(debug==TRUE){
@@ -1199,142 +1157,72 @@ static void handle_connection_read(int sock, void *data){
          * use poll() - which fails on a pipe with any data, so it would cause us to
          * only ever write one command at a time into the pipe.
          */
-        //syslog(LOG_ERR,"'%s' (%s) []",check_result_path, strlen(check_result_path));
-        if (check_result_path==NULL){
         write_check_result(host_name,svc_description,return_code,plugin_output,time(NULL));
-        }else{
-                write_checkresult_file(host_name,svc_description,return_code,plugin_output,time(NULL));
-        }
 
 	return;
         }
 
 
 
-/* writes service/host check results to the Nagios checkresult directory */
-static int write_checkresult_file(char *host_name, char *svc_description, int return_code, char *plugin_output, time_t check_time){
-	if(debug==TRUE)
-		syslog(LOG_ERR,"Attempting to write checkresult file");
-        mode_t new_umask=077;
-        mode_t old_umask;
-        time_t current_time;
-        char *output_file=NULL;
-        int checkresult_file_fd=-1;
-        char *checkresult_file=NULL;
-        char *checkresult_ok_file=NULL;
-        FILE *checkresult_file_fp=NULL;
-        FILE *checkresult_ok_file_fp=NULL;
-        /* change and store umask */
-        old_umask=umask(new_umask);
-
-        /* create safe checkresult file */
-        asprintf(&checkresult_file,"%s/cXXXXXX",check_result_path);
-        checkresult_file_fd=mkstemp(checkresult_file);
-        if(checkresult_file_fd>0){
-                checkresult_file_fp=fdopen(checkresult_file_fd,"w");
-        } else {
-                syslog(LOG_ERR,"Unable to open and write checkresult file '%s', failing back to PIPE",checkresult_file);
-                return write_check_result(host_name,svc_description,return_code,plugin_output,check_time);
-                }
-        
-	if(debug==TRUE)
-		syslog(LOG_ERR,"checkresult file '%s' open for write.",checkresult_file);
-
-        time(&current_time);
-        fprintf(checkresult_file_fp,"### NSCA Passive Check Result ###\n");
-        fprintf(checkresult_file_fp,"# Time: %s",ctime(&current_time));
-        fprintf(checkresult_file_fp,"file_time=%d\n\n",current_time);
-        fprintf(checkresult_file_fp,"### %s Check Result ###\n",(svc_description=="")?"Host":"Service");
-        fprintf(checkresult_file_fp,"host_name=%s\n",host_name);
-        if(strcmp(svc_description,""))
-                fprintf(checkresult_file_fp,"service_description=%s\n",svc_description);
-        fprintf(checkresult_file_fp,"check_type=1\n");
-        fprintf(checkresult_file_fp,"scheduled_check=0\n");
-        fprintf(checkresult_file_fp,"reschedule_check=0\n");
-        /* We have no latency data at this point. */
-        fprintf(checkresult_file_fp,"latency=0\n");
-        fprintf(checkresult_file_fp,"start_time=%lu.%lu\n",check_time,0L);
-        fprintf(checkresult_file_fp,"finish_time=%lu.%lu\n",check_time,0L);
-        fprintf(checkresult_file_fp,"return_code=%d\n",return_code);
-        /* newlines in output are already escaped */
-        fprintf(checkresult_file_fp,"output=%s\n",(plugin_output==NULL)?"":plugin_output);
-        fprintf(checkresult_file_fp,"\n");
-
-        fclose(checkresult_file_fp);
-        /* create and close ok file */
-        asprintf(&checkresult_ok_file,"%s.ok",checkresult_file);
-        syslog(LOG_DEBUG,"checkresult completion file '%s' open.",checkresult_ok_file);
-        checkresult_ok_file_fp = fopen(checkresult_ok_file,"w");
-        fclose(checkresult_ok_file_fp);
-        /* reset umask */
-        umask(old_umask);
-
-        return OK;
-        }
-
 /* writes service/host check results to the Nagios command file */
 static int write_check_result(char *host_name, char *svc_description, int return_code, char *plugin_output, time_t check_time){
-	if(debug==TRUE)
-		syslog(LOG_ERR,"Attempting to write to nagios command pipe");
+		struct shm_header * hdr;
+		struct server * srvmap;
+		struct service * svcmap;
+		
+		int x;
+		int f=-1;
+		
         if(aggregate_writes==FALSE){
                 if(open_command_file()==ERROR)
                         return ERROR;
                 }
 
-	if(!strcmp(svc_description,""))
-		fprintf(command_file_fp,"[%lu] PROCESS_HOST_CHECK_RESULT;%s;%d;%s\n",(unsigned long)check_time,host_name,return_code,plugin_output);
-	else{
-		fprintf(command_file_fp,"[%lu] PROCESS_SERVICE_CHECK_RESULT;%s;%s;%d;%s\n",(unsigned long)check_time,host_name,svc_description,return_code,plugin_output);
-                }
-        if(aggregate_writes==FALSE)
-                close_command_file();
-        else
-                /* if we don't fflush() then we're writing in 4k non-CR-terminated blocks, and
-                 * anything else (eg. pscwatch) which writes to the file will be writing into
-                 * the middle of our commands.
-                 */
-                fflush(command_file_fp);
-        
-        return OK;
-        }
+				hdr=bartlby_SHM_GetHDR(command_file_fp);
+				srvmap=bartlby_SHM_ServerMap(command_file_fp);
+				svcmap=bartlby_SHM_ServiceMap(command_file_fp);
+				
+				for(x=0; x<hdr->svccount; x++ ) {
+					
+					if(strcmp(srvmap[svcmap[x].srv_place].server_name, host_name) == 0) {
+						if(strcmp(svcmap[x].service_name, svc_description) == 0) {
+							f=1;
+							svcmap[x].current_state=return_code;
+							snprintf(svcmap[x].new_server_text, 1024, "%s",  	plugin_output);
+							svcmap[x].last_check = check_time;		
+							break;
+						}	
+					}
+				}
+				if(f < 0) {
+					syslog(LOG_ERR, "bartlby: %s/%s not found", host_name, svc_description);	
+				}
+				       
+				return OK;
+			
 
+}
 
 
 /* opens the command file for writing */
 static int open_command_file(void){
-	struct stat statbuf;
+			int gshm_id;
 
         /* file is already open */
         if(command_file_fp!=NULL && using_alternate_dump_file==FALSE)
                 return OK;
 
-	/* command file doesn't exist - monitoring app probably isn't running... */
-	if(stat(command_file,&statbuf)){
-		
-		if(debug==TRUE)
-			syslog(LOG_ERR,"Command file '%s' does not exist, attempting to use alternate dump file '%s' for output",command_file,alternate_dump_file);
-
-		/* try and write checks to alternate dump file */
-		command_file_fp=fopen(alternate_dump_file,"a");
-		if(command_file_fp==NULL){
-			if(debug==TRUE)
-				syslog(LOG_ERR,"Could not open alternate dump file '%s' for appending",alternate_dump_file);
-			return ERROR;
-                        }
-		using_alternate_dump_file=TRUE;
-
-		return OK;
-	        }
-
-        /* open the command file for writing or appending */
-        command_file_fp=fopen(command_file,(append_to_file==TRUE)?"a":"w");
-        if(command_file_fp==NULL){
-                if(debug==TRUE)
-                        syslog(LOG_ERR,"Could not open command file '%s' for %s",command_file,(append_to_file==TRUE)?"appending":"writing");
-                return ERROR;
-                }
-
-	using_alternate_dump_file=FALSE;
+	     gshm_id = shmget(ftok(bartlby_shm_key, 32), 0,0777);
+	     if(gshm_id < 0) {
+	     	syslog(LOG_ERR,"bartlby: shm problem: '%s'", bartlby_shm_key);	
+	     	return ERROR;
+	     }
+	     
+	     command_file_fp = shmat(gshm_id,NULL,0);
+	     
+	     syslog(LOG_NOTICE,"bartlby: shm connected");	
+	    	
+	    
         return OK;
         }
 
@@ -1343,8 +1231,8 @@ static int open_command_file(void){
 /* closes the command file */
 static void close_command_file(void){
 
-        fclose(command_file_fp);
-        command_file_fp=NULL;
+       shmdt(command_file_fp);
+       command_file_fp=NULL;  
 
         return;
         }

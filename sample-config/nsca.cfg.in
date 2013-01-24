@@ -10,12 +10,7 @@
 # The syslog facility that should be used for logging purposes.
 
 log_facility=@log_facility@
-
-# Check Result directory.  If passed, skip command pipe and submit
-# directly into the checkresult directory.  Requires Nagios 3+
-# For best results, mount dir on ramdisk.
-
-#check_result_path=/usr/local/nagios/var/checkresults
+bartlby_shm_key=/opt/bartlby
 
 
 # PID FILE
@@ -82,7 +77,7 @@ nsca_group=@nsca_grp@
 # messages are logged to the syslog facility. 
 # Values: 0 = debugging off, 1 = debugging on
 
-debug=0
+debug=1
 
 
 
